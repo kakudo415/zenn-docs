@@ -24,7 +24,7 @@ struct MySlice {
 }
 ```
 
-:::details サンプルデータを含むプログラム全体
+:::details サンプルデータ生成を含むプログラム全体
 
 ```rust
 use std::alloc;
@@ -63,7 +63,7 @@ fn main() {
 
 :::
 
-`Vec<T>`は`Deref`トレイトを実装していて、`&Vec<T>`は自動で`&[T]`に変換されます。
+本家`Vec<T>`は`Deref`トレイトを実装していて、`&Vec<T>`は自動で`&[T]`に変換されます。
 この処理を`MyVec`・`MySlice`に素直に実装してみると以下のようになります。
 
 ```rust
@@ -84,4 +84,71 @@ impl ops::Deref for MyVec {
 
 ```
 error[E0515]: cannot return reference to local variable `temporary_myslice`
+```
+
+# 本家の挙動を追う
+
+解決策を知るため、本家の実装を追ってみます。
+まずは、`Vec<T>`に対する`Deref`トレイトの実装です。
+
+`alloc/vec/mod.rs`を読むと、`slice::from_raw_parts()`が呼ばれているようです。
+
+```rust
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T, A: Allocator> ops::Deref for Vec<T, A> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        unsafe { slice::from_raw_parts(self.as_ptr(), self.len) }
+    }
+}
+```
+
+`core/slice/raw.rs`
+
+```rust
+#[inline]
+#[stable(feature = "rust1", since = "1.0.0")]
+#[rustc_const_unstable(feature = "const_slice_from_raw_parts", issue = "67456")]
+#[must_use]
+pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
+    // SAFETY: the caller must uphold the safety contract for `from_raw_parts`.
+    unsafe {
+        assert_unsafe_precondition!(
+            is_aligned_and_not_null(data)
+                && crate::mem::size_of::<T>().saturating_mul(len) <= isize::MAX as usize
+        );
+        &*ptr::slice_from_raw_parts(data, len)
+    }
+}
+```
+
+`&*`なるものがついていますが、とりあえずさらに`ptr::slice_from_raw_parts()`を確認してみます。
+
+`core/ptr/mod.rs`
+
+```rust
+#[inline]
+#[stable(feature = "slice_from_raw_parts", since = "1.42.0")]
+#[rustc_const_unstable(feature = "const_slice_from_raw_parts", issue = "67456")]
+pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
+    from_raw_parts(data.cast(), len)
+}
+```
+
+`core/ptr/metadata.rs`
+
+```rust
+#[unstable(feature = "ptr_metadata", issue = "81513")]
+#[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
+#[inline]
+pub const fn from_raw_parts<T: ?Sized>(
+    data_address: *const (),
+    metadata: <T as Pointee>::Metadata,
+) -> *const T {
+    // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
+    // and PtrComponents<T> have the same memory layouts. Only std can make this
+    // guarantee.
+    unsafe { PtrRepr { components: PtrComponents { data_address, metadata } }.const_ptr }
+}
 ```
